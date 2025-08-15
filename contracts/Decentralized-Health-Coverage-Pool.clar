@@ -23,8 +23,13 @@
 (define-constant ERR-ALREADY-VOTED (err u108))
 (define-constant ERR-INVALID-CLAIM-STATUS (err u109))
 (define-constant ERR-LIST-OVERFLOW (err u110))
+(define-constant ERR-NO-WITHDRAWAL-REQUEST (err u111))
+(define-constant ERR-WITHDRAWAL-COOLING-PERIOD (err u112))
+(define-constant ERR-INSUFFICIENT-MEMBER-BALANCE (err u113))
 (define-constant MIN-CONTRIBUTION u1000000)
 (define-constant CLAIM-REVIEW-THRESHOLD u5000000)
+(define-constant EMERGENCY-WITHDRAWAL-COOLING-PERIOD u1008)
+(define-constant EMERGENCY-WITHDRAWAL-PENALTY-PERCENT u10)
 
 (define-data-var pool-balance uint u0)
 (define-data-var total-members uint u0)
@@ -220,6 +225,14 @@
 
 (define-map approver-votes {claim-id: uint, approver: principal} bool)
 
+(define-map emergency-withdrawals principal
+  {
+    requested-amount: uint,
+    request-height: uint,
+    is-pending: bool
+  }
+)
+
 (define-public (add-approver (new-approver principal))
   (begin
     (asserts! (is-eq tx-sender (var-get admin)) (err u100))
@@ -310,3 +323,80 @@
 
 (define-read-only (get-approver-count)
   (ok (var-get approver-count)))
+
+(define-public (request-emergency-withdrawal (amount uint))
+  (let (
+    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
+    (existing-request (map-get? emergency-withdrawals tx-sender))
+  )
+    (asserts! (<= amount (get balance member-data)) ERR-INSUFFICIENT-MEMBER-BALANCE)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (is-none existing-request) (err u101))
+    
+    (map-set emergency-withdrawals tx-sender
+      {
+        requested-amount: amount,
+        request-height: stacks-block-height,
+        is-pending: true
+      })
+    (ok true)))
+
+(define-public (execute-emergency-withdrawal)
+  (let (
+    (withdrawal-data (unwrap! (map-get? emergency-withdrawals tx-sender) ERR-NO-WITHDRAWAL-REQUEST))
+    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
+    (blocks-passed (- stacks-block-height (get request-height withdrawal-data)))
+    (penalty-amount (/ (* (get requested-amount withdrawal-data) EMERGENCY-WITHDRAWAL-PENALTY-PERCENT) u100))
+    (final-amount (- (get requested-amount withdrawal-data) penalty-amount))
+  )
+    (asserts! (get is-pending withdrawal-data) (err u101))
+    (asserts! (>= blocks-passed EMERGENCY-WITHDRAWAL-COOLING-PERIOD) ERR-WITHDRAWAL-COOLING-PERIOD)
+    (asserts! (<= (get requested-amount withdrawal-data) (get balance member-data)) ERR-INSUFFICIENT-MEMBER-BALANCE)
+    
+    (try! (as-contract (stx-transfer? final-amount tx-sender tx-sender)))
+    
+    (map-set members tx-sender
+      (merge member-data {balance: (- (get balance member-data) (get requested-amount withdrawal-data))}))
+    
+    (var-set pool-balance (- (var-get pool-balance) final-amount))
+    
+    (map-delete emergency-withdrawals tx-sender)
+    (ok final-amount)))
+
+(define-public (cancel-emergency-withdrawal)
+  (let ((withdrawal-data (unwrap! (map-get? emergency-withdrawals tx-sender) ERR-NO-WITHDRAWAL-REQUEST)))
+    (map-delete emergency-withdrawals tx-sender)
+    (ok true)))
+
+(define-public (admin-approve-emergency-withdrawal (member principal))
+  (let (
+    (withdrawal-data (unwrap! (map-get? emergency-withdrawals member) ERR-NO-WITHDRAWAL-REQUEST))
+    (member-data (unwrap! (map-get? members member) (err u101)))
+    (withdrawal-amount (get requested-amount withdrawal-data))
+  )
+    (asserts! (is-eq tx-sender (var-get admin)) (err u100))
+    (asserts! (get is-pending withdrawal-data) (err u101))
+    (asserts! (<= withdrawal-amount (get balance member-data)) ERR-INSUFFICIENT-MEMBER-BALANCE)
+    
+    (try! (as-contract (stx-transfer? withdrawal-amount tx-sender member)))
+    
+    (map-set members member
+      (merge member-data {balance: (- (get balance member-data) withdrawal-amount)}))
+    
+    (var-set pool-balance (- (var-get pool-balance) withdrawal-amount))
+    
+    (map-delete emergency-withdrawals member)
+    (ok withdrawal-amount)))
+
+(define-read-only (get-emergency-withdrawal-request (member principal))
+  (ok (map-get? emergency-withdrawals member)))
+
+(define-read-only (get-withdrawal-cooldown-remaining (member principal))
+  (let ((withdrawal-data (map-get? emergency-withdrawals member)))
+    (match withdrawal-data
+      data 
+        (let ((blocks-passed (- stacks-block-height (get request-height data))))
+          (if (>= blocks-passed EMERGENCY-WITHDRAWAL-COOLING-PERIOD)
+            (ok u0)
+            (ok (- EMERGENCY-WITHDRAWAL-COOLING-PERIOD blocks-passed))))
+      (ok u0))))
