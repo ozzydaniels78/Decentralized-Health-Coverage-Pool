@@ -400,3 +400,132 @@
             (ok u0)
             (ok (- EMERGENCY-WITHDRAWAL-COOLING-PERIOD blocks-passed))))
       (ok u0))))
+
+(define-constant RISK-SCORE-BASE u100)
+(define-constant RISK-ADJUSTMENT-FACTOR u20)
+(define-constant TENURE-BONUS-BLOCKS u2016)
+(define-constant MAX-RISK-MULTIPLIER u300)
+(define-constant MIN-RISK-MULTIPLIER u50)
+
+(define-map member-risk-scores principal
+  {
+    base-score: uint,
+    claim-frequency-score: uint,
+    claim-amount-score: uint,
+    tenure-bonus: uint,
+    final-score: uint,
+    last-updated: uint
+  }
+)
+
+(define-private (calculate-claim-frequency-score (member principal))
+  (let (
+    (member-data (default-to {balance: u0, joined-height: u0, total-claims: u0} (map-get? members member)))
+    (blocks-since-joined (- stacks-block-height (get joined-height member-data)))
+    (claims-per-period (if (> blocks-since-joined u0)
+                        (/ (* (get total-claims member-data) u1000) blocks-since-joined)
+                        u0))
+  )
+    (if (> claims-per-period u10)
+      (+ RISK-SCORE-BASE (* claims-per-period RISK-ADJUSTMENT-FACTOR))
+      RISK-SCORE-BASE)))
+
+(define-private (calculate-claim-amount-score (member principal))
+  (let (
+    (member-data (default-to {balance: u0, joined-height: u0, total-claims: u0} (map-get? members member)))
+    (avg-claim-ratio (if (> (get total-claims member-data) u0)
+                       (/ (get balance member-data) (get total-claims member-data))
+                       u0))
+  )
+    (if (< avg-claim-ratio u500000)
+      (+ RISK-SCORE-BASE u50)
+      RISK-SCORE-BASE)))
+
+(define-private (calculate-tenure-bonus (member principal))
+  (let (
+    (member-data (default-to {balance: u0, joined-height: u0, total-claims: u0} (map-get? members member)))
+    (blocks-since-joined (- stacks-block-height (get joined-height member-data)))
+    (tenure-periods (/ blocks-since-joined TENURE-BONUS-BLOCKS))
+  )
+    (if (> tenure-periods u0) 
+      (if (< (* tenure-periods u5) u25) (* tenure-periods u5) u25) 
+      u0)))
+
+(define-public (update-risk-score (member principal))
+  (let (
+    (frequency-score (calculate-claim-frequency-score member))
+    (amount-score (calculate-claim-amount-score member))
+    (tenure-bonus (calculate-tenure-bonus member))
+    (combined-score (+ frequency-score amount-score))
+    (final-score (if (> combined-score tenure-bonus) (- combined-score tenure-bonus) u50))
+  )
+    (map-set member-risk-scores member
+      {
+        base-score: RISK-SCORE-BASE,
+        claim-frequency-score: frequency-score,
+        claim-amount-score: amount-score,
+        tenure-bonus: tenure-bonus,
+        final-score: final-score,
+        last-updated: stacks-block-height
+      })
+    (ok final-score)))
+
+(define-public (calculate-risk-adjusted-premium (member principal))
+  (let (
+    (base-premium (var-get base-premium-amount))
+    (risk-data (default-to 
+      {base-score: RISK-SCORE-BASE, claim-frequency-score: RISK-SCORE-BASE, 
+       claim-amount-score: RISK-SCORE-BASE, tenure-bonus: u0, 
+       final-score: RISK-SCORE-BASE, last-updated: u0}
+      (map-get? member-risk-scores member)))
+    (risk-multiplier (if (> (get final-score risk-data) MAX-RISK-MULTIPLIER) 
+                        MAX-RISK-MULTIPLIER
+                        (if (< (get final-score risk-data) MIN-RISK-MULTIPLIER) 
+                           MIN-RISK-MULTIPLIER 
+                           (get final-score risk-data))))
+    (adjusted-premium (/ (* base-premium risk-multiplier) u100))
+  )
+    (ok adjusted-premium)))
+
+(define-public (pay-risk-adjusted-premium)
+  (let (
+    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
+  )
+    (let ((risk-score (unwrap! (update-risk-score tx-sender) ERR-INVALID-AMOUNT)))
+      (let ((adjusted-premium (unwrap! (calculate-risk-adjusted-premium tx-sender) ERR-INVALID-AMOUNT)))
+        (try! (stx-transfer? adjusted-premium tx-sender (as-contract tx-sender)))
+        (map-set member-premiums tx-sender
+          {
+            last-payment-height: stacks-block-height,
+            premium-amount: adjusted-premium,
+            is-active: true,
+            missed-payments: u0
+          })
+        (var-set pool-balance (+ (var-get pool-balance) adjusted-premium))
+        (ok adjusted-premium)))))
+
+(define-read-only (get-member-risk-score (member principal))
+  (ok (map-get? member-risk-scores member)))
+
+(define-read-only (get-risk-assessment-summary (member principal))
+  (let (
+    (risk-data (map-get? member-risk-scores member))
+    (base-premium (var-get base-premium-amount))
+  )
+    (match risk-data
+      data (ok {
+        risk-score: (get final-score data),
+        premium-multiplier: (if (> (get final-score data) MAX-RISK-MULTIPLIER) 
+                              MAX-RISK-MULTIPLIER
+                              (if (< (get final-score data) MIN-RISK-MULTIPLIER) 
+                                 MIN-RISK-MULTIPLIER 
+                                 (get final-score data))),
+        suggested-premium: (/ (* base-premium (get final-score data)) u100),
+        last-assessment: (get last-updated data)
+      })
+      (ok {
+        risk-score: RISK-SCORE-BASE,
+        premium-multiplier: RISK-SCORE-BASE,
+        suggested-premium: base-premium,
+        last-assessment: u0
+      }))))
