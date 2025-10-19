@@ -1,14 +1,25 @@
 [project]
-name = 'Decentralized-Health-Coverage-Pool'
-description = ''
-authors = []
+name = 'decentralized-health-coverage-pool'
+description = 'A peer-pooled micro-health coverage system built on Stacks blockchain'
+authors = ['ozzydaniels78@gmail.com']
 telemetry = true
-cache_dir = '.\.cache'
+cache_dir = './.clarinet'
 requirements = []
-[contracts.Decentralized-Health-Coverage-Pool]
+boot_contracts = []
+
+[contracts.health-pool]
 path = 'contracts/Decentralized-Health-Coverage-Pool.clar'
 clarity_version = 3
-epoch = 3.1
+epoch = "3.0"
+
+[contracts.referral-system]
+path = 'contracts/referral-system.clar'
+clarity_version = 3
+epoch = "3.0"
+
+[repl]
+parser_version = 2
+
 [repl.analysis]
 passes = ['check_checker']
 

@@ -1,531 +1,259 @@
+;; Decentralized Health Coverage Pool
+;; A peer-to-peer health insurance system on Stacks blockchain
 
-;; title: Decentralized-Health-Coverage-Pool
-;; version:
-;; summary:
-;; description:
-
-;; traits
-;;
-
-;; token definitions
-;;
-
-;; constants
-;;(define-constant ERR-NOT-AUTHORIZED (err u100))
+;; Error constants
+(define-constant ERR-NOT-AUTHORIZED (err u100))
 (define-constant ERR-INSUFFICIENT-FUNDS (err u101))
-(define-constant ERR-INVALID-AMOUNT (err u102))
+(define-constant ERR-MEMBER-NOT-FOUND (err u102))
 (define-constant ERR-CLAIM-NOT-FOUND (err u103))
-(define-constant ERR-ALREADY-MEMBER (err u104))
+(define-constant ERR-MINIMUM-CONTRIBUTION (err u104))
+(define-constant ERR-CLAIM-ALREADY-PROCESSED (err u105))
+(define-constant ERR-MEMBER-ALREADY-EXISTS (err u106))
+(define-constant ERR-INVALID-AMOUNT (err u107))
+(define-constant ERR-CLAIM-LIMIT-EXCEEDED (err u108))
+(define-constant ERR-INSUFFICIENT-BALANCE (err u109))
 
-(define-constant ERR-MEMBER-INACTIVE (err u105))
-(define-constant ERR-APPROVER-EXISTS (err u106))
-(define-constant ERR-APPROVER-NOT-FOUND (err u107))
-(define-constant ERR-ALREADY-VOTED (err u108))
-(define-constant ERR-INVALID-CLAIM-STATUS (err u109))
-(define-constant ERR-LIST-OVERFLOW (err u110))
-(define-constant ERR-NO-WITHDRAWAL-REQUEST (err u111))
-(define-constant ERR-WITHDRAWAL-COOLING-PERIOD (err u112))
-(define-constant ERR-INSUFFICIENT-MEMBER-BALANCE (err u113))
-(define-constant MIN-CONTRIBUTION u1000000)
-(define-constant CLAIM-REVIEW-THRESHOLD u5000000)
-(define-constant EMERGENCY-WITHDRAWAL-COOLING-PERIOD u1008)
-(define-constant EMERGENCY-WITHDRAWAL-PENALTY-PERCENT u10)
-
+;; Data variables
+(define-data-var contract-owner principal tx-sender)
 (define-data-var pool-balance uint u0)
 (define-data-var total-members uint u0)
-(define-data-var admin principal tx-sender)
+(define-data-var total-claims uint u0)
+(define-data-var minimum-contribution uint u1000000) ;; 1 STX in microSTX
+(define-data-var max-claim-amount uint u5000000) ;; 5 STX max claim
 
-(define-map members principal 
-  {
-    balance: uint,
-    joined-height: uint,
-    total-claims: uint
-  }
-)
+;; Data maps
+(define-map members principal {
+    contribution: uint,
+    total-contributed: uint,
+    claims-count: uint,
+    last-claim-block: uint,
+    is-active: bool
+})
 
-(define-map claims uint 
-  {
+(define-map claims uint {
     member: principal,
     amount: uint,
-    status: (string-ascii 20),
-    evidence: (string-ascii 256),
-    stacks-block-height: uint
-  }
-)
+    evidence-hash: (string-ascii 64),
+    status: (string-ascii 10), ;; "pending", "approved", "rejected"
+    submitted-at: uint,
+    processed-at: (optional uint),
+    processor: (optional principal)
+})
 
-(define-data-var claim-nonce uint u0)
+;; Emergency pause functionality
+(define-data-var is-paused bool false)
 
-(define-public (initialize-pool (new-admin principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u100))
-    (var-set admin new-admin)
-    (ok true)))
+;; Member management functions
 (define-public (join-pool (contribution uint))
-  (begin
-    (asserts! (>= contribution MIN-CONTRIBUTION) ERR-INVALID-AMOUNT)
-    (asserts! (is-none (map-get? members tx-sender)) ERR-ALREADY-MEMBER)
-    (try! (stx-transfer? contribution tx-sender (as-contract tx-sender)))
-    (map-set members tx-sender
-      {
-        balance: contribution,
-        joined-height: stacks-block-height,
-        total-claims: u0
-      })
-    (var-set pool-balance (+ (var-get pool-balance) contribution))
-    (var-set total-members (+ (var-get total-members) u1))
-    (ok true)))
-
-(define-public (contribute (amount uint))
-  (let ((member-data (unwrap! (map-get? members tx-sender) (err u101))))
-    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-    (map-set members tx-sender
-      (merge member-data {balance: (+ (get balance member-data) amount)}))
-    (var-set pool-balance (+ (var-get pool-balance) amount))
-    (ok true)))
-(define-public (submit-claim (amount uint) (evidence (string-ascii 256)))
-  (let (
-    (claim-id (var-get claim-nonce))
-    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
-  )
-    (asserts! (< amount (var-get pool-balance)) ERR-INSUFFICIENT-FUNDS)
-    (map-set claims claim-id
-      {
-        member: tx-sender,
-        amount: amount,
-        status: "PENDING",
-        evidence: evidence,
-        stacks-block-height: stacks-block-height
-      })
-    (var-set claim-nonce (+ claim-id u1))
-    (ok claim-id)))
-(define-public (approve-claim (claim-id uint))
-  (let (
-    (claim (unwrap! (map-get? claims claim-id) ERR-CLAIM-NOT-FOUND))
-    (member-data (unwrap! (map-get? members (get member claim)) (err u101)))
-  )
-    (asserts! (is-eq tx-sender (var-get admin)) (err u101))
-    (try! (as-contract (stx-transfer? (get amount claim) tx-sender (get member claim))))
-    (map-set claims claim-id (merge claim {status: "APPROVED"}))
-    (map-set members (get member claim)
-      (merge member-data {total-claims: (+ (get total-claims member-data) u1)}))
-    (var-set pool-balance (- (var-get pool-balance) (get amount claim)))
-    (ok true)))
-(define-public (reject-claim (claim-id uint))
-  (let ((claim (unwrap! (map-get? claims claim-id) ERR-CLAIM-NOT-FOUND)))
-    (asserts! (is-eq tx-sender (var-get admin)) (err u101))
-    (map-set claims claim-id (merge claim {status: "REJECTED"}))
-    (ok true)))
-
-(define-read-only (get-pool-balance)
-  (ok (var-get pool-balance)))
-
-(define-read-only (get-member-data (member principal))
-  (ok (map-get? members member)))
-
-(define-read-only (get-claim (claim-id uint))
-  (ok (map-get? claims claim-id)))
-
-(define-read-only (get-total-members)
-  (ok (var-get total-members)))
-
-(define-constant PREMIUM-PERIOD u144)
-(define-constant DEFAULT-PREMIUM-AMOUNT u100000)
-
-(define-data-var base-premium-amount uint DEFAULT-PREMIUM-AMOUNT)
-
-(define-map member-premiums principal
-  {
-    last-payment-height: uint,
-    premium-amount: uint,
-    is-active: bool,
-    missed-payments: uint
-  }
+    (let ((sender tx-sender))
+        (asserts! (not (var-get is-paused)) ERR-NOT-AUTHORIZED)
+        (asserts! (>= contribution (var-get minimum-contribution)) ERR-MINIMUM-CONTRIBUTION)
+        (asserts! (is-none (map-get? members sender)) ERR-MEMBER-ALREADY-EXISTS)
+        
+        ;; Transfer STX to contract
+        (try! (stx-transfer? contribution sender (as-contract tx-sender)))
+        
+        ;; Add member
+        (map-set members sender {
+            contribution: contribution,
+            total-contributed: contribution,
+            claims-count: u0,
+            last-claim-block: u0,
+            is-active: true
+        })
+        
+        ;; Update pool stats
+        (var-set pool-balance (+ (var-get pool-balance) contribution))
+        (var-set total-members (+ (var-get total-members) u1))
+        
+        (ok true)
+    )
 )
 
-(define-public (set-premium-amount (member principal) (amount uint))
-  (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u100))
-    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
-    (let ((existing-premium (default-to 
-            {last-payment-height: u0, premium-amount: (var-get base-premium-amount), is-active: false, missed-payments: u0}
-            (map-get? member-premiums member))))
-      (map-set member-premiums member
-        (merge existing-premium {premium-amount: amount}))
-      (ok true))))
+(define-public (contribute-additional (amount uint))
+    (let ((sender tx-sender)
+          (member-data (unwrap! (map-get? members sender) ERR-MEMBER-NOT-FOUND)))
+        (asserts! (not (var-get is-paused)) ERR-NOT-AUTHORIZED)
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (get is-active member-data) ERR-MEMBER-NOT-FOUND)
+        
+        ;; Transfer STX to contract
+        (try! (stx-transfer? amount sender (as-contract tx-sender)))
+        
+        ;; Update member data
+        (map-set members sender (merge member-data {
+            contribution: (+ (get contribution member-data) amount),
+            total-contributed: (+ (get total-contributed member-data) amount)
+        }))
+        
+        ;; Update pool balance
+        (var-set pool-balance (+ (var-get pool-balance) amount))
+        
+        (ok true)
+    )
+)
 
-(define-public (pay-premium)
-  (let (
-    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
-    (premium-data (default-to 
-      {last-payment-height: u0, premium-amount: (var-get base-premium-amount), is-active: false, missed-payments: u0}
-      (map-get? member-premiums tx-sender)))
-  )
-    (try! (stx-transfer? (get premium-amount premium-data) tx-sender (as-contract tx-sender)))
-    (map-set member-premiums tx-sender
-      {
-        last-payment-height: stacks-block-height,
-        premium-amount: (get premium-amount premium-data),
-        is-active: true,
-        missed-payments: u0
-      })
-    (var-set pool-balance (+ (var-get pool-balance) (get premium-amount premium-data)))
-    (ok true)))
+;; Claim management functions
+(define-public (submit-claim (amount uint) (evidence-hash (string-ascii 64)))
+    (let ((sender tx-sender)
+          (claim-id (+ (var-get total-claims) u1))
+          (member-data (unwrap! (map-get? members sender) ERR-MEMBER-NOT-FOUND)))
+        (asserts! (not (var-get is-paused)) ERR-NOT-AUTHORIZED)
+        (asserts! (get is-active member-data) ERR-MEMBER-NOT-FOUND)
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (<= amount (var-get max-claim-amount)) ERR-CLAIM-LIMIT-EXCEEDED)
+        (asserts! (<= amount (var-get pool-balance)) ERR-INSUFFICIENT-BALANCE)
+        
+        ;; Create claim
+        (map-set claims claim-id {
+            member: sender,
+            amount: amount,
+            evidence-hash: evidence-hash,
+            status: "pending",
+            submitted-at: stacks-block-height,
+            processed-at: none,
+            processor: none
+        })
+        
+        ;; Update member claims count
+        (map-set members sender (merge member-data {
+            claims-count: (+ (get claims-count member-data) u1),
+            last-claim-block: stacks-block-height
+        }))
+        
+        ;; Update total claims
+        (var-set total-claims claim-id)
+        
+        (ok claim-id)
+    )
+)
+
+(define-public (approve-claim (claim-id uint))
+    (let ((claim-data (unwrap! (map-get? claims claim-id) ERR-CLAIM-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status claim-data) "pending") ERR-CLAIM-ALREADY-PROCESSED)
+        (asserts! (<= (get amount claim-data) (var-get pool-balance)) ERR-INSUFFICIENT-BALANCE)
+        
+        ;; Transfer funds to member
+        (try! (as-contract (stx-transfer? (get amount claim-data) tx-sender (get member claim-data))))
+        
+        ;; Update claim status
+        (map-set claims claim-id (merge claim-data {
+            status: "approved",
+            processed-at: (some stacks-block-height),
+            processor: (some tx-sender)
+        }))
+        
+        ;; Update pool balance
+        (var-set pool-balance (- (var-get pool-balance) (get amount claim-data)))
+        
+        (ok true)
+    )
+)
+
+(define-public (reject-claim (claim-id uint))
+    (let ((claim-data (unwrap! (map-get? claims claim-id) ERR-CLAIM-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status claim-data) "pending") ERR-CLAIM-ALREADY-PROCESSED)
+        
+        ;; Update claim status
+        (map-set claims claim-id (merge claim-data {
+            status: "rejected",
+            processed-at: (some stacks-block-height),
+            processor: (some tx-sender)
+        }))
+        
+        (ok true)
+    )
+)
+
+;; Admin functions
+(define-public (set-minimum-contribution (amount uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+        (var-set minimum-contribution amount)
+        (ok true)
+    )
+)
+
+(define-public (set-max-claim-amount (amount uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+        (var-set max-claim-amount amount)
+        (ok true)
+    )
+)
+
+(define-public (pause-contract)
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (var-set is-paused true)
+        (ok true)
+    )
+)
+
+(define-public (unpause-contract)
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (var-set is-paused false)
+        (ok true)
+    )
+)
 
 (define-public (deactivate-member (member principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u100))
-    (let ((premium-data (unwrap! (map-get? member-premiums member) (err u101))))
-      (map-set member-premiums member
-        (merge premium-data {is-active: false, missed-payments: (+ (get missed-payments premium-data) u1)}))
-      (ok true))))
-
-(define-read-only (is-member-active (member principal))
-  (let ((premium-data (map-get? member-premiums member)))
-    (match premium-data
-      data (and 
-             (get is-active data)
-             (< (- stacks-block-height (get last-payment-height data)) PREMIUM-PERIOD))
-      false)))
-
-(define-read-only (get-member-premium-status (member principal))
-  (ok (map-get? member-premiums member)))
-
-(define-public (submit-claim-with-premium-check (amount uint) (evidence (string-ascii 256)))
-  (let (
-    (claim-id (var-get claim-nonce))
-    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
-  )
-    (asserts! (is-member-active tx-sender) (err u105))
-    (asserts! (< amount (var-get pool-balance)) ERR-INSUFFICIENT-FUNDS)
-    (map-set claims claim-id
-      {
-        member: tx-sender,
-        amount: amount,
-        status: "PENDING",
-        evidence: evidence,
-        stacks-block-height: stacks-block-height
-      })
-    (var-set claim-nonce (+ claim-id u1))
-    (ok claim-id)))
-
-    (define-constant MULTISIG-THRESHOLD u3)
-(define-constant LARGE-CLAIM-THRESHOLD u5000000)
-
-(define-data-var approver-count uint u0)
-
-(define-map approvers principal bool)
-
-(define-map claim-votes uint
-  {
-    approvals: uint,
-    rejections: uint,
-    voters: (list 10 principal)
-  }
+    (let ((member-data (unwrap! (map-get? members member) ERR-MEMBER-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (map-set members member (merge member-data { is-active: false }))
+        (ok true)
+    )
 )
 
-(define-map approver-votes {claim-id: uint, approver: principal} bool)
-
-(define-map emergency-withdrawals principal
-  {
-    requested-amount: uint,
-    request-height: uint,
-    is-pending: bool
-  }
+;; Read-only functions
+(define-read-only (get-pool-balance)
+    (var-get pool-balance)
 )
 
-(define-public (add-approver (new-approver principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u100))
-    (asserts! (is-none (map-get? approvers new-approver)) (err u106))
-    (map-set approvers new-approver true)
-    (var-set approver-count (+ (var-get approver-count) u1))
-    (ok true)))
-
-(define-public (remove-approver (approver principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u100))
-    (asserts! (is-some (map-get? approvers approver)) (err u107))
-    (map-delete approvers approver)
-    (var-set approver-count (- (var-get approver-count) u1))
-    (ok true)))
-
-(define-public (vote-on-claim (claim-id uint) (approve bool))
-  (let (
-    (claim (unwrap! (map-get? claims claim-id) ERR-CLAIM-NOT-FOUND))
-    (vote-data (default-to {approvals: u0, rejections: u0, voters: (list)} (map-get? claim-votes claim-id)))
-    (existing-vote (map-get? approver-votes {claim-id: claim-id, approver: tx-sender}))
-  )
-    (asserts! (default-to false (map-get? approvers tx-sender)) (err u100))
-    (asserts! (is-none existing-vote) (err u108))
-    (asserts! (is-eq (get status claim) "PENDING") (err u109))
-    
-    (map-set approver-votes {claim-id: claim-id, approver: tx-sender} approve)
-    
-    (let ((updated-vote-data 
-           (if approve
-             (merge vote-data {
-               approvals: (+ (get approvals vote-data) u1),
-               voters: (unwrap! (as-max-len? (append (get voters vote-data) tx-sender) u10) (err u110))
-             })
-             (merge vote-data {
-               rejections: (+ (get rejections vote-data) u1),
-               voters: (unwrap! (as-max-len? (append (get voters vote-data) tx-sender) u10) (err u110))
-             }))))
-      
-      (map-set claim-votes claim-id updated-vote-data)
-      
-      (if (>= (get approvals updated-vote-data) MULTISIG-THRESHOLD)
-        (execute-claim-approval claim-id)
-        (if (>= (get rejections updated-vote-data) MULTISIG-THRESHOLD)
-          (execute-claim-rejection claim-id)
-          (ok true))))))
-
-(define-private (execute-claim-approval (claim-id uint))
-  (let (
-    (claim (unwrap! (map-get? claims claim-id) ERR-CLAIM-NOT-FOUND))
-    (member-data (unwrap! (map-get? members (get member claim)) (err u101)))
-  )
-    (try! (as-contract (stx-transfer? (get amount claim) tx-sender (get member claim))))
-    (map-set claims claim-id (merge claim {status: "APPROVED"}))
-    (map-set members (get member claim)
-      (merge member-data {total-claims: (+ (get total-claims member-data) u1)}))
-    (var-set pool-balance (- (var-get pool-balance) (get amount claim)))
-    (ok true)))
-
-(define-private (execute-claim-rejection (claim-id uint))
-  (let ((claim (unwrap! (map-get? claims claim-id) ERR-CLAIM-NOT-FOUND)))
-    (map-set claims claim-id (merge claim {status: "REJECTED"}))
-    (ok true)))
-
-(define-public (submit-large-claim (amount uint) (evidence (string-ascii 256)))
-  (let (
-    (claim-id (var-get claim-nonce))
-    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
-  )
-    (asserts! (< amount (var-get pool-balance)) ERR-INSUFFICIENT-FUNDS)
-    (map-set claims claim-id
-      {
-        member: tx-sender,
-        amount: amount,
-        status: "PENDING",
-        evidence: evidence,
-        stacks-block-height: stacks-block-height
-      })
-    (map-set claim-votes claim-id {approvals: u0, rejections: u0, voters: (list)})
-    (var-set claim-nonce (+ claim-id u1))
-    (ok claim-id)))
-
-(define-read-only (get-claim-votes (claim-id uint))
-  (ok (map-get? claim-votes claim-id)))
-
-(define-read-only (is-approver (principal-check principal))
-  (default-to false (map-get? approvers principal-check)))
-
-(define-read-only (get-approver-count)
-  (ok (var-get approver-count)))
-
-(define-public (request-emergency-withdrawal (amount uint))
-  (let (
-    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
-    (existing-request (map-get? emergency-withdrawals tx-sender))
-  )
-    (asserts! (<= amount (get balance member-data)) ERR-INSUFFICIENT-MEMBER-BALANCE)
-    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
-    (asserts! (is-none existing-request) (err u101))
-    
-    (map-set emergency-withdrawals tx-sender
-      {
-        requested-amount: amount,
-        request-height: stacks-block-height,
-        is-pending: true
-      })
-    (ok true)))
-
-(define-public (execute-emergency-withdrawal)
-  (let (
-    (withdrawal-data (unwrap! (map-get? emergency-withdrawals tx-sender) ERR-NO-WITHDRAWAL-REQUEST))
-    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
-    (blocks-passed (- stacks-block-height (get request-height withdrawal-data)))
-    (penalty-amount (/ (* (get requested-amount withdrawal-data) EMERGENCY-WITHDRAWAL-PENALTY-PERCENT) u100))
-    (final-amount (- (get requested-amount withdrawal-data) penalty-amount))
-  )
-    (asserts! (get is-pending withdrawal-data) (err u101))
-    (asserts! (>= blocks-passed EMERGENCY-WITHDRAWAL-COOLING-PERIOD) ERR-WITHDRAWAL-COOLING-PERIOD)
-    (asserts! (<= (get requested-amount withdrawal-data) (get balance member-data)) ERR-INSUFFICIENT-MEMBER-BALANCE)
-    
-    (try! (as-contract (stx-transfer? final-amount tx-sender tx-sender)))
-    
-    (map-set members tx-sender
-      (merge member-data {balance: (- (get balance member-data) (get requested-amount withdrawal-data))}))
-    
-    (var-set pool-balance (- (var-get pool-balance) final-amount))
-    
-    (map-delete emergency-withdrawals tx-sender)
-    (ok final-amount)))
-
-(define-public (cancel-emergency-withdrawal)
-  (let ((withdrawal-data (unwrap! (map-get? emergency-withdrawals tx-sender) ERR-NO-WITHDRAWAL-REQUEST)))
-    (map-delete emergency-withdrawals tx-sender)
-    (ok true)))
-
-(define-public (admin-approve-emergency-withdrawal (member principal))
-  (let (
-    (withdrawal-data (unwrap! (map-get? emergency-withdrawals member) ERR-NO-WITHDRAWAL-REQUEST))
-    (member-data (unwrap! (map-get? members member) (err u101)))
-    (withdrawal-amount (get requested-amount withdrawal-data))
-  )
-    (asserts! (is-eq tx-sender (var-get admin)) (err u100))
-    (asserts! (get is-pending withdrawal-data) (err u101))
-    (asserts! (<= withdrawal-amount (get balance member-data)) ERR-INSUFFICIENT-MEMBER-BALANCE)
-    
-    (try! (as-contract (stx-transfer? withdrawal-amount tx-sender member)))
-    
-    (map-set members member
-      (merge member-data {balance: (- (get balance member-data) withdrawal-amount)}))
-    
-    (var-set pool-balance (- (var-get pool-balance) withdrawal-amount))
-    
-    (map-delete emergency-withdrawals member)
-    (ok withdrawal-amount)))
-
-(define-read-only (get-emergency-withdrawal-request (member principal))
-  (ok (map-get? emergency-withdrawals member)))
-
-(define-read-only (get-withdrawal-cooldown-remaining (member principal))
-  (let ((withdrawal-data (map-get? emergency-withdrawals member)))
-    (match withdrawal-data
-      data 
-        (let ((blocks-passed (- stacks-block-height (get request-height data))))
-          (if (>= blocks-passed EMERGENCY-WITHDRAWAL-COOLING-PERIOD)
-            (ok u0)
-            (ok (- EMERGENCY-WITHDRAWAL-COOLING-PERIOD blocks-passed))))
-      (ok u0))))
-
-(define-constant RISK-SCORE-BASE u100)
-(define-constant RISK-ADJUSTMENT-FACTOR u20)
-(define-constant TENURE-BONUS-BLOCKS u2016)
-(define-constant MAX-RISK-MULTIPLIER u300)
-(define-constant MIN-RISK-MULTIPLIER u50)
-
-(define-map member-risk-scores principal
-  {
-    base-score: uint,
-    claim-frequency-score: uint,
-    claim-amount-score: uint,
-    tenure-bonus: uint,
-    final-score: uint,
-    last-updated: uint
-  }
+(define-read-only (get-total-members)
+    (var-get total-members)
 )
 
-(define-private (calculate-claim-frequency-score (member principal))
-  (let (
-    (member-data (default-to {balance: u0, joined-height: u0, total-claims: u0} (map-get? members member)))
-    (blocks-since-joined (- stacks-block-height (get joined-height member-data)))
-    (claims-per-period (if (> blocks-since-joined u0)
-                        (/ (* (get total-claims member-data) u1000) blocks-since-joined)
-                        u0))
-  )
-    (if (> claims-per-period u10)
-      (+ RISK-SCORE-BASE (* claims-per-period RISK-ADJUSTMENT-FACTOR))
-      RISK-SCORE-BASE)))
+(define-read-only (get-total-claims)
+    (var-get total-claims)
+)
 
-(define-private (calculate-claim-amount-score (member principal))
-  (let (
-    (member-data (default-to {balance: u0, joined-height: u0, total-claims: u0} (map-get? members member)))
-    (avg-claim-ratio (if (> (get total-claims member-data) u0)
-                       (/ (get balance member-data) (get total-claims member-data))
-                       u0))
-  )
-    (if (< avg-claim-ratio u500000)
-      (+ RISK-SCORE-BASE u50)
-      RISK-SCORE-BASE)))
+(define-read-only (get-member-data (member principal))
+    (map-get? members member)
+)
 
-(define-private (calculate-tenure-bonus (member principal))
-  (let (
-    (member-data (default-to {balance: u0, joined-height: u0, total-claims: u0} (map-get? members member)))
-    (blocks-since-joined (- stacks-block-height (get joined-height member-data)))
-    (tenure-periods (/ blocks-since-joined TENURE-BONUS-BLOCKS))
-  )
-    (if (> tenure-periods u0) 
-      (if (< (* tenure-periods u5) u25) (* tenure-periods u5) u25) 
-      u0)))
+(define-read-only (get-claim-data (claim-id uint))
+    (map-get? claims claim-id)
+)
 
-(define-public (update-risk-score (member principal))
-  (let (
-    (frequency-score (calculate-claim-frequency-score member))
-    (amount-score (calculate-claim-amount-score member))
-    (tenure-bonus (calculate-tenure-bonus member))
-    (combined-score (+ frequency-score amount-score))
-    (final-score (if (> combined-score tenure-bonus) (- combined-score tenure-bonus) u50))
-  )
-    (map-set member-risk-scores member
-      {
-        base-score: RISK-SCORE-BASE,
-        claim-frequency-score: frequency-score,
-        claim-amount-score: amount-score,
-        tenure-bonus: tenure-bonus,
-        final-score: final-score,
-        last-updated: stacks-block-height
-      })
-    (ok final-score)))
+(define-read-only (get-contract-owner)
+    (var-get contract-owner)
+)
 
-(define-public (calculate-risk-adjusted-premium (member principal))
-  (let (
-    (base-premium (var-get base-premium-amount))
-    (risk-data (default-to 
-      {base-score: RISK-SCORE-BASE, claim-frequency-score: RISK-SCORE-BASE, 
-       claim-amount-score: RISK-SCORE-BASE, tenure-bonus: u0, 
-       final-score: RISK-SCORE-BASE, last-updated: u0}
-      (map-get? member-risk-scores member)))
-    (risk-multiplier (if (> (get final-score risk-data) MAX-RISK-MULTIPLIER) 
-                        MAX-RISK-MULTIPLIER
-                        (if (< (get final-score risk-data) MIN-RISK-MULTIPLIER) 
-                           MIN-RISK-MULTIPLIER 
-                           (get final-score risk-data))))
-    (adjusted-premium (/ (* base-premium risk-multiplier) u100))
-  )
-    (ok adjusted-premium)))
+(define-read-only (get-minimum-contribution)
+    (var-get minimum-contribution)
+)
 
-(define-public (pay-risk-adjusted-premium)
-  (let (
-    (member-data (unwrap! (map-get? members tx-sender) (err u101)))
-  )
-    (let ((risk-score (unwrap! (update-risk-score tx-sender) ERR-INVALID-AMOUNT)))
-      (let ((adjusted-premium (unwrap! (calculate-risk-adjusted-premium tx-sender) ERR-INVALID-AMOUNT)))
-        (try! (stx-transfer? adjusted-premium tx-sender (as-contract tx-sender)))
-        (map-set member-premiums tx-sender
-          {
-            last-payment-height: stacks-block-height,
-            premium-amount: adjusted-premium,
-            is-active: true,
-            missed-payments: u0
-          })
-        (var-set pool-balance (+ (var-get pool-balance) adjusted-premium))
-        (ok adjusted-premium)))))
+(define-read-only (get-max-claim-amount)
+    (var-get max-claim-amount)
+)
 
-(define-read-only (get-member-risk-score (member principal))
-  (ok (map-get? member-risk-scores member)))
+(define-read-only (is-contract-paused)
+    (var-get is-paused)
+)
 
-(define-read-only (get-risk-assessment-summary (member principal))
-  (let (
-    (risk-data (map-get? member-risk-scores member))
-    (base-premium (var-get base-premium-amount))
-  )
-    (match risk-data
-      data (ok {
-        risk-score: (get final-score data),
-        premium-multiplier: (if (> (get final-score data) MAX-RISK-MULTIPLIER) 
-                              MAX-RISK-MULTIPLIER
-                              (if (< (get final-score data) MIN-RISK-MULTIPLIER) 
-                                 MIN-RISK-MULTIPLIER 
-                                 (get final-score data))),
-        suggested-premium: (/ (* base-premium (get final-score data)) u100),
-        last-assessment: (get last-updated data)
-      })
-      (ok {
-        risk-score: RISK-SCORE-BASE,
-        premium-multiplier: RISK-SCORE-BASE,
-        suggested-premium: base-premium,
-        last-assessment: u0
-      }))))
+(define-read-only (get-pool-stats)
+    {
+        balance: (var-get pool-balance),
+        total-members: (var-get total-members),
+        total-claims: (var-get total-claims),
+        min-contribution: (var-get minimum-contribution),
+        max-claim: (var-get max-claim-amount),
+        is-paused: (var-get is-paused)
+    }
+)
