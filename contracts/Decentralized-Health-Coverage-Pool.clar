@@ -12,6 +12,8 @@
 (define-constant ERR-INVALID-AMOUNT (err u107))
 (define-constant ERR-CLAIM-LIMIT-EXCEEDED (err u108))
 (define-constant ERR-INSUFFICIENT-BALANCE (err u109))
+(define-constant ERR-SELF-REFERRAL (err u110))
+(define-constant ERR-REFERRER-NOT-ACTIVE (err u111))
 
 ;; Data variables
 (define-data-var contract-owner principal tx-sender)
@@ -20,6 +22,7 @@
 (define-data-var total-claims uint u0)
 (define-data-var minimum-contribution uint u1000000) ;; 1 STX in microSTX
 (define-data-var max-claim-amount uint u5000000) ;; 5 STX max claim
+(define-data-var referral-reward-percentage uint u5) ;; 5% of contribution as reward
 
 ;; Data maps
 (define-map members principal {
@@ -28,6 +31,12 @@
     claims-count: uint,
     last-claim-block: uint,
     is-active: bool
+})
+
+(define-map referral-stats principal {
+    referrals-made: uint,
+    total-rewards-earned: uint,
+    unclaimed-rewards: uint
 })
 
 (define-map claims uint {
@@ -44,16 +53,35 @@
 (define-data-var is-paused bool false)
 
 ;; Member management functions
-(define-public (join-pool (contribution uint))
-    (let ((sender tx-sender))
+(define-public (join-pool (contribution uint) (referrer (optional principal)))
+    (let (
+        (sender tx-sender)
+        (reward-amount (/ (* contribution (var-get referral-reward-percentage)) u100))
+    )
         (asserts! (not (var-get is-paused)) ERR-NOT-AUTHORIZED)
         (asserts! (>= contribution (var-get minimum-contribution)) ERR-MINIMUM-CONTRIBUTION)
         (asserts! (is-none (map-get? members sender)) ERR-MEMBER-ALREADY-EXISTS)
         
-        ;; Transfer STX to contract
+        (match referrer
+            referrer-principal
+            (begin
+                (asserts! (not (is-eq referrer-principal sender)) ERR-SELF-REFERRAL)
+                (let ((referrer-data (unwrap! (map-get? members referrer-principal) ERR-MEMBER-NOT-FOUND)))
+                    (asserts! (get is-active referrer-data) ERR-REFERRER-NOT-ACTIVE)
+                    (let ((referrer-stats (default-to { referrals-made: u0, total-rewards-earned: u0, unclaimed-rewards: u0 } (map-get? referral-stats referrer-principal))))
+                        (map-set referral-stats referrer-principal {
+                            referrals-made: (+ (get referrals-made referrer-stats) u1),
+                            total-rewards-earned: (+ (get total-rewards-earned referrer-stats) reward-amount),
+                            unclaimed-rewards: (+ (get unclaimed-rewards referrer-stats) reward-amount)
+                        })
+                    )
+                )
+            )
+            true
+        )
+        
         (try! (stx-transfer? contribution sender (as-contract tx-sender)))
         
-        ;; Add member
         (map-set members sender {
             contribution: contribution,
             total-contributed: contribution,
@@ -62,7 +90,6 @@
             is-active: true
         })
         
-        ;; Update pool stats
         (var-set pool-balance (+ (var-get pool-balance) contribution))
         (var-set total-members (+ (var-get total-members) u1))
         
@@ -210,6 +237,37 @@
     )
 )
 
+(define-public (claim-referral-rewards)
+    (let (
+        (sender tx-sender)
+        (referrer-stats (unwrap! (map-get? referral-stats sender) ERR-MEMBER-NOT-FOUND))
+        (reward-amount (get unclaimed-rewards referrer-stats))
+    )
+        (asserts! (not (var-get is-paused)) ERR-NOT-AUTHORIZED)
+        (asserts! (> reward-amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (<= reward-amount (var-get pool-balance)) ERR-INSUFFICIENT-BALANCE)
+        
+        (try! (as-contract (stx-transfer? reward-amount tx-sender sender)))
+        
+        (map-set referral-stats sender (merge referrer-stats {
+            unclaimed-rewards: u0
+        }))
+        
+        (var-set pool-balance (- (var-get pool-balance) reward-amount))
+        
+        (ok reward-amount)
+    )
+)
+
+(define-public (set-referral-reward-percentage (percentage uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (<= percentage u100) ERR-INVALID-AMOUNT)
+        (var-set referral-reward-percentage percentage)
+        (ok true)
+    )
+)
+
 ;; Read-only functions
 (define-read-only (get-pool-balance)
     (var-get pool-balance)
@@ -245,6 +303,14 @@
 
 (define-read-only (is-contract-paused)
     (var-get is-paused)
+)
+
+(define-read-only (get-referral-stats (member principal))
+    (map-get? referral-stats member)
+)
+
+(define-read-only (get-referral-reward-percentage)
+    (var-get referral-reward-percentage)
 )
 
 (define-read-only (get-pool-stats)

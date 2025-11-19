@@ -45,20 +45,16 @@ genesis:
       balance: "100000000000000"
       sbtc-balance: "1000000000"
   contracts:
-    - genesis
-    - lockup
-    - bns
-    - cost-voting
     - costs
     - pox
-    - costs-2
     - pox-2
-    - costs-3
     - pox-3
     - pox-4
-    - signers
-    - signers-voting
-    - costs-4
+    - lockup
+    - costs-2
+    - costs-3
+    - cost-voting
+    - bns
 plan:
   batches:
     - id: 0
@@ -66,11 +62,11 @@ plan:
         - emulated-contract-publish:
             contract-name: health-pool
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/Decentralized-Health-Coverage-Pool.clar
+            path: "contracts\\Decentralized-Health-Coverage-Pool.clar"
             clarity-version: 3
         - emulated-contract-publish:
             contract-name: referral-system
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/referral-system.clar
+            path: "contracts\\referral-system.clar"
             clarity-version: 3
       epoch: "3.0"
